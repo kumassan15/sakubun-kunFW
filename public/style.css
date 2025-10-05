@@ -1,0 +1,94 @@
+:root{
+  --page-pad: clamp(12px, 2vh, 24px);
+  --gap: 16px;
+  --container-max: 1280px;
+}
+*{ box-sizing: border-box; }
+html,body{ height:auto; margin:0; }
+body{
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans JP", sans-serif;
+  display:flex; justify-content:center;
+  padding: var(--page-pad);
+  background:#f0f2f5;
+  min-height:0;
+}
+.container{
+  display:flex; flex-direction:column; gap:var(--gap);
+  background:#fff; padding: clamp(16px, 2.2vh, 32px);
+  border-radius:12px; box-shadow:0 6px 18px rgba(0,0,0,.08);
+  width:min(var(--container-max), 92vw);
+  min-height:0;
+}
+h1 {
+  color: #2c3e50;
+  text-align: center;
+  margin: 0 0 8px;
+  font-size: clamp(26px, 3.2vh, 40px);
+  font-family: 'Segoe UI', Roboto, "Helvetica Neue", Arial, sans-serif;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+}
+.actions{ display:flex; gap:10px; }
+
+label {
+  font-weight: 700;
+  margin-top: 8px;
+}
+
+button{
+  flex:1; padding:14px; background:#007bff; color:#fff; border:none; border-radius:8px;
+  font-size:clamp(16px,2vh,18px);  font-weight: 700; cursor:pointer;
+  transition: transform .02s ease, background-color .25s ease;
+}
+
+button:hover{ background:#0056b3; }
+button:active{ transform: translateY(1px); }
+
+textarea{
+  width:100%; min-height:100px; padding:12px;
+  border:1px solid #d0d7de; border-radius:8px;
+  font-size:clamp(14px,1.9vh,16px); line-height:1.6;
+  resize: vertical;
+  background:#fff;
+  overflow-y: hidden;
+}
+
+#feedbackArea{
+  padding:16px; background:#e9ecef; border-left:4px solid #007bff;
+  border-radius:8px; line-height:1.7; white-space:pre-wrap;
+  overflow:visible; min-height:0;
+}
+
+/* Q&A */
+#qaSection{ margin-top:4px; padding-top:4px; border-top:1px dashed #d0d7de; }
+.qaRow{ display:grid; grid-template-columns:1fr auto; gap:10px; align-items:center; }
+#qaInput{
+  width:100%; padding:12px; border:1px solid #d0d7de; border-radius:8px;
+  font-size:clamp(14px,1.9vh,16px); background:#fff;
+}
+#qaList details{
+  background:#eef7ee; border-left:4px solid #28a745; border-radius:8px;
+  margin-top:10px; padding:8px 12px;
+}
+#qaList summary{ cursor:pointer; font-weight:600; list-style:none; }
+#qaList summary::-webkit-details-marker{ display:none; }
+.qaSummaryLine{ display:flex; gap:10px; align-items:center; }
+.qaBadge{ font-size:12px; padding:2px 8px; border-radius:999px; background:#d1f1d1; color:#1f7a1f; }
+.qaAnswer{ margin-top:8px; white-space:pre-wrap; line-height:1.7; }
+.subtle{ font-size:12px; color:#666; margin-top:4px; }
+.loading{ font-style:italic; color:#666; }
+
+/* 質問するボタン専用スタイル */
+.qaButton {
+  flex: 0 0 auto;
+  padding: 12px 16px;
+  background-color: gray;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  font-size: clamp(16px, 2vh, 18px);
+  cursor: pointer;
+  transition: transform .02s ease, background-color .25s ease;
+}
+.qaButton:hover { background-color: #555; }
+.qaButton:active { transform: translateY(1px); }

@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <title>作文くんFW</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="stylesheet" href="/style.css">
+  </head>
+  <body>
+    <div class="container">
+      <h1>自由英作文チェッカー　作文くん FW</h1>
+
+      <label for="questionText">問題文</label>
+      <textarea id="questionText" placeholder="問題文を入力してください..."></textarea>
+
+      <label for="englishText">答案文</label>
+      <textarea id="englishText" placeholder="あなたの答案文を入力してください..."></textarea>
+
+      <div class="actions">
+        <button id="checkButton">添 削</button>
+      </div>
+
+      <div id="feedbackArea">
+        <p>作文くんからのフィードバックがここに表示されます。</p>
+      </div>
+
+      <div id="qaSection">
+        <label for="qaInput">Q&amp;A（フィードバックに関する質問を1行で入力）</label>
+        <div class="qaRow">
+          <input id="qaInput" type="text" placeholder="例）S2の 'benefit' は可算名詞ですか？理由も教えてください。" />
+          <button class="qaButton" id="qaButton">質問する</button>
+        </div>
+        <div class="subtle">ヒント：Enter で送信（改行は不可）。</div>
+        <div id="qaList"></div>
+      </div>
+    </div>
+
+    <script src="/script.js"></script>
+  </body>
+</html>
