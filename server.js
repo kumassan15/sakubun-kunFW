@@ -97,7 +97,7 @@ function buildExpressionPrompt(opts) {
       "・基本は〇（o）を与える。B1相当の結束語や複文が時折見られれば十分。",
       "・ただし以下の極端な単調/初級性は減点：(1)短文羅列のみ (2)語彙の極端な反復 (3)等位接続のみで従属結合が皆無。",
       "・(1)～(3)に明確に該当 → △/×。",
-      "【スコープ制限】内容（主題/論旨/飛躍/段落/結論）は扱わない。"
+      "【スコープ制限】内容（主題/論旨/飛躍/矛盾/段落/結論）は扱わない。"
     ].join("\n");
 
     const schema = [
@@ -136,7 +136,7 @@ function buildExpressionPrompt(opts) {
     const rules = [
       "《項目ごとのフィードバック》は①C-1/②C-2を必ず表示。〇△×を明示、根拠はS番号付きで簡潔に。",
       "《改善ポイント》は△/×のみ列挙。文番号→item番号順。理由・改善表現・修正例は具体的に。",
-      "内容面（主題/論旨/飛躍/段落/結論）は含めない。"
+      "内容面（主題/論旨/飛躍/矛盾/段落/結論）は含めない。"
     ].join("\n");
 
     return [
@@ -183,7 +183,7 @@ function buildContentPrompt(opts) {
     const sys = [
       "あなたは大学入試自由英作文を教えている、生徒のやる気を引き出すのが得意な予備校の先生です。",
       "対象はCEFR A2。目的はB1到達。多少の論理的甘さは許容し、できていれば肯定的に評価。",
-      "「論理の飛躍(leaps)」は誰が読んでも明らかな場合のみ数える。",
+      "「論理の飛躍(leaps)」や「論理の矛盾（順接・逆接など）」は誰が読んでも明らかな場合のみ数える。",
       "評価項目：2-1主題の一貫性 / 2-2本文の論理展開。点数は出さない。",
       "返答はJSONのみ。details.D-2_leaps を必ず含める。"
     ].join("\n");
@@ -255,7 +255,7 @@ function buildContentPrompt(opts) {
       "②本文が論理的に展開されている → △（飛躍2件：S3→S4、S9→S10）",
       "",
       "《改善ポイント》",
-      "S3→S4　2②論理の飛躍（転換が唐突）",
+      "S3→S4　2②論理の展開（前後で矛盾している）",
       "…修正提案…"
     ].join("\n");
   }
@@ -354,7 +354,7 @@ function enforceExpressionDetailScope(text) {
   for (let ln of lines) {
     if (/^《改善ポイント》/.test(ln)) inImprove = true;
     if (inImprove) {
-      if (/(主題|論旨|論理|飛躍|段落|構成|結論)/.test(ln)) continue;
+      if (/(主題|論旨|論理|飛躍|矛盾|段落|構成|結論)/.test(ln)) continue;
       if (/S\d+\s*→\s*S\d+/.test(ln)) continue;
     }
     out.push(ln);
@@ -385,9 +385,9 @@ function enforceContentDetailConsistency(contObj, text) {
 
     if (inImprove) {
       if (d2 === 'o') {
-        if (/S\d+\s*→\s*S\d+/.test(ln) || /(論理|飛躍)/.test(ln)) continue;
+        if (/S\d+\s*→\s*S\d+/.test(ln) || /(論理|飛躍|矛盾)/.test(ln)) continue;
       } else if (leaps === 0) {
-        if (/S\d+\s*→\s*S\d+/.test(ln) || /飛躍/.test(ln)) continue;
+        if (/S\d+\s*→\s*S\d+/.test(ln) || /論理|飛躍|矛盾/.test(ln)) continue;
       }
       if (/(文法|語法|語彙|文構造|接続詞|単語|句動詞)/.test(ln)) continue;
     }
