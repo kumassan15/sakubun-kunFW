@@ -15,12 +15,10 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
 
-/* ================= ユーティリティ ================= */
+/* =============== ユーティリティ =============== */
 
-// クリップ（長すぎる入力は安全側でカット）
 function clip(s, n){ return (s == null ? "" : String(s)).slice(0, n); }
 
-// 改行・空行の整理（既存）
 function normalizeBlankLines(text) {
   if (!text) return text;
   return String(text)
@@ -30,35 +28,27 @@ function normalizeBlankLines(text) {
     .replace(/(《改善ポイント》)\n{2,}/g, "$1\n");
 }
 
-/* ================= Gemini呼び出し（堅牢版） ================= */
+/* =============== Gemini 呼び出し（堅牢版） =============== */
 
-// レスポンスから文字列を頑健に抽出
 function extractModelText(body){
   const cand = body?.candidates?.[0];
   if (!cand) return { text: "", reason: "no_candidates" };
 
-  // parts[].text を全連結
   let text = "";
   const parts = cand?.content?.parts;
   if (Array.isArray(parts)) {
     text = parts.map(p => p?.text).filter(Boolean).join("");
   }
-
-  // 一部実装では candidates[0].text に直接入ることも
   if (!text && typeof cand?.text === "string") {
     text = cand.text;
   }
-
-  // コードフェンス（```...```）内に入っている場合を救済
   if (!text) {
     const raw = JSON.stringify(body);
     const m = raw.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
     if (m && m[1]) text = m[1];
   }
-
   const block = body?.promptFeedback?.blockReason || cand?.finishReason;
   if (!text) return { text: "", reason: block || "empty_text" };
-
   return { text, reason: "ok" };
 }
 
@@ -67,12 +57,15 @@ async function callGenerativeLanguageAPI(promptText, modelName, maxTokens = 512)
     return "エラー: APIキーが未設定です。サーバーの .env で GEMINI_API_KEY を設定してください。";
   }
   const primary = modelName || 'gemini-2.5-flash';
-  const models = [primary, 'gemini-2.0-flash-lite']; // フォールバック
+  const models = [primary, 'gemini-2.0-flash-lite']; // フォールバック候補
+
+  // ✅ 正式カテゴリ名に修正済み
   const safetySettings = [
-    { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_ONLY_HIGH" },
-    { category: "HARM_CATEGORY_HARASSMENT",  threshold: "BLOCK_ONLY_HIGH" },
-    { category: "HARM_CATEGORY_SEXUAL",      threshold: "BLOCK_ONLY_HIGH" },
-    { category: "HARM_CATEGORY_DANGEROUS",   threshold: "BLOCK_ONLY_HIGH" }
+    { category: "HARM_CATEGORY_HATE_SPEECH",       threshold: "BLOCK_ONLY_HIGH" },
+    { category: "HARM_CATEGORY_HARASSMENT",        threshold: "BLOCK_ONLY_HIGH" },
+    { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_ONLY_HIGH" },
+    { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_ONLY_HIGH" },
+    // { category: "HARM_CATEGORY_CIVIC_INTEGRITY",   threshold: "BLOCK_ONLY_HIGH" }, // 必要時のみ
   ];
 
   for (const effectiveModel of models) {
@@ -82,7 +75,10 @@ async function callGenerativeLanguageAPI(promptText, modelName, maxTokens = 512)
     const payload = {
       contents: [{ parts: [{ text: promptText }]}],
       generationConfig: {
-        candidateCount: 1, temperature: 0.2, topK: 40, topP: 0.95,
+        candidateCount: 1,
+        temperature: 0.2,
+        topK: 40,
+        topP: 0.95,
         maxOutputTokens: maxTokens
       },
       safetySettings
@@ -110,17 +106,13 @@ async function callGenerativeLanguageAPI(promptText, modelName, maxTokens = 512)
           continue;
         }
 
-        if (code === 503) {
-          await new Promise(r => setTimeout(r, 2000 * (i + 1)));
-          continue;
-        }
-
+        if (code === 503) { await new Promise(r => setTimeout(r, 2000 * (i + 1))); continue; }
         if (code === 429) return "エラー: リクエスト過多です。しばらくしてから再実行してください。";
         if (code === 401 || code === 403) return "エラー: 認証/権限に問題があります。APIキーや割り当てをご確認ください。";
         if (code === 404) return "エラー: モデルIDが認識されません。指定モデルをご確認ください。";
         if (code >= 500) return "エラー: サーバー側で問題が発生しました。時間を置いて再実行してください。";
 
-        return `エラー: サービス応答に問題（HTTP ${code}）。${JSON.stringify(body).slice(0,400)}...`;
+        return `エラー: サービス応答に問題（HTTP ${code}）。body=${JSON.stringify(body).slice(0,800)}`;
       } catch (e) {
         if (i === 2) return "エラー: 例外が発生しました → " + e;
         await new Promise(r => setTimeout(r, 800 * (i + 1)));
@@ -131,7 +123,7 @@ async function callGenerativeLanguageAPI(promptText, modelName, maxTokens = 512)
   return "エラー: すべてのモデルで応答が得られませんでした。";
 }
 
-/* ================= 評価プロンプト（JSON出力） ================= */
+/* =============== 評価プロンプト（JSON出力） =============== */
 
 function buildExpressionPrompt(opts) {
   const question = clip((opts && opts.question) || "", 2000);
@@ -229,7 +221,7 @@ function buildContentPrompt(opts) {
   throw new Error("buildContentPrompt: invalid mode");
 }
 
-/* ================= 改善配列JSONプロンプト ================= */
+/* =============== 改善配列 JSON プロンプト =============== */
 
 function buildExpressionImprovementsJSONPrompt({ question, answerNumbered, expObj }) {
   const q  = clip(question, 2000);
@@ -241,14 +233,11 @@ function buildExpressionImprovementsJSONPrompt({ question, answerNumbered, expOb
     "対象は日本人高校生。CEFR B1を目標とします。",
     "以下は表現評価の機械可読結果です。この評価を変更せず、必要な改善点のみを抽出してください。",
     "",
-    "【問題文】",
-    q || "（問題文なし）",
+    "【問題文】", q || "（問題文なし）",
     "",
-    "【あなたの答案（文番号付き）】",
-    an,
+    "【あなたの答案（文番号付き）】", an,
     "",
-    "【評価結果（固定）】",
-    ej,
+    "【評価結果（固定）】", ej,
     "",
     "出力は JSON のみ。次のスキーマに**厳密**に従ってください：",
     "{",
@@ -281,14 +270,11 @@ function buildContentImprovementsJSONPrompt({ question, answerNumbered, contObj 
     "あなたは大学入試自由英作文の指導者です。対象は日本人高校生。CEFR B1を目標とします。",
     "以下は内容評価（主題/論理）の機械可読結果です。この評価を変更せず、必要な改善点のみを抽出してください。",
     "",
-    "【問題文】",
-    q || "（問題文なし）",
+    "【問題文】", q || "（問題文なし）",
     "",
-    "【あなたの答案（文番号付き）】",
-    an,
+    "【あなたの答案（文番号付き）】", an,
     "",
-    "【評価結果（固定）】",
-    cj,
+    "【評価結果（固定）】", cj,
     "",
     "出力は JSON のみ。次のスキーマに**厳密**に従ってください：",
     "{",
@@ -312,7 +298,7 @@ function buildContentImprovementsJSONPrompt({ question, answerNumbered, contObj 
   ].join("\n");
 }
 
-/* ================= JSONパース/補修/整形 ================= */
+/* =============== JSONパース/補修/整形 =============== */
 
 function safeParseModelJSON(text, label="") {
   if (!text) throw new Error(`モデル応答が空です（${label}）。`);
@@ -394,12 +380,10 @@ function renderContentDetailFromImps({ contObj, imps }) {
   return lines.join("\n");
 }
 
-/* ================= スコア/整形ガード（既存ロジック） ================= */
+/* =============== スコア/整形ガード =============== */
 
 function computeScoresByThresholds(expObj, contObj) {
-  // 表現（満点10・最低2）
   let exp = 10;
-
   let incorrect = 0;
   if (expObj?.details && typeof expObj.details["C-1_incorrect"] !== "undefined") {
     incorrect = Number(expObj.details["C-1_incorrect"]) || 0;
@@ -407,9 +391,7 @@ function computeScoresByThresholds(expObj, contObj) {
   exp -= Math.min(Math.max(incorrect, 0), 8);
 
   const v11 = expObj?.items ? expObj.items["C-1"] : undefined;
-  if (v11 === 'd' && incorrect === 0) {
-    exp -= 2;
-  }
+  if (v11 === 'd' && incorrect === 0) exp -= 2;
 
   const v12 = expObj?.items ? expObj.items["C-2"] : undefined;
   if (v12 === 'd') exp -= 2;
@@ -417,9 +399,7 @@ function computeScoresByThresholds(expObj, contObj) {
 
   exp = Math.round(Math.min(10, Math.max(2, exp)));
 
-  // 内容（満点10・最低0）
   let cont = 10;
-
   const v21 = String(contObj?.items?.["D-1"] ?? "").trim();
   if (v21 === 'd') cont -= 4;
   else if (v21 === 'x') cont -= 20;
@@ -441,7 +421,6 @@ function computeScoresByThresholds(expObj, contObj) {
 
   cont = Math.round(Math.min(10, Math.max(0, cont)));
 
-  // 総合（満点20・最低2）
   let total = exp + cont;
   total = Math.round(Math.min(20, Math.max(2, total)));
 
@@ -474,7 +453,6 @@ function enforceExpressionDetailScope(text) {
 
 function enforceContentDetailConsistency(contObj, text) {
   if (!text) return text;
-
   const d2 = String(contObj?.items?.["D-2"] ?? "").trim();
   const leaps = Number(contObj?.details?.["D-2_leaps"] ?? 0);
 
@@ -508,7 +486,7 @@ function enforceContentDetailConsistency(contObj, text) {
   return out.join("\n");
 }
 
-/* ================= 採点要件・QA ================= */
+/* =============== 採点要件・QA プロンプト =============== */
 
 function buildRequirementJudgementPrompt(question, wordCount) {
   const q = clip(question || "（問題文なし）", 2000);
@@ -545,7 +523,7 @@ function buildQAPrompt(ctx) {
   ].join("\n");
 }
 
-/* ================= フィードバックAPI本体 ================= */
+/* =============== フィードバックAPI本体 =============== */
 
 async function getFeedback(input) {
   try {
@@ -641,7 +619,7 @@ async function getFeedback(input) {
     const expImps = safeParseImprovementsJSON(expImpText, "表現改善JSON").items;
     const contImps = safeParseImprovementsJSON(contImpText, "内容改善JSON").items;
 
-    // 整形（ここで必ず「修正例→修正理由」を出力）
+    // 整形（必ず「修正例→修正理由」を出力）
     let safeC = renderExpressionDetailFromImps({ expObj, imps: expImps });
     safeC = normalizeBlankLines(enforceExpressionDetailScope(safeC));
 
@@ -694,13 +672,7 @@ async function getQA(payload) {
     const pref = String(payload.modelPreference || '').toLowerCase();
     if (pref === 'pro' || pref === 'gemini-2.5-pro') modelId = 'gemini-2.5-pro';
 
-    const prompt = buildQAPrompt({
-      question,
-      originalQuestion,
-      originalText,
-      feedback
-    });
-
+    const prompt = buildQAPrompt({ question, originalQuestion, originalText, feedback });
     const answer = await callGenerativeLanguageAPI(prompt, modelId, 700);
 
     if (!answer || answer.startsWith("エラー") || answer.startsWith("APIからの有効な応答がありませんでした。")) {
@@ -712,7 +684,7 @@ async function getQA(payload) {
   }
 }
 
-/* ============================ API ルート ============================ */
+/* =============== API ルート =============== */
 
 app.post('/api/feedback', async (req, res) => {
   const result = await getFeedback(req.body || {});
@@ -724,7 +696,7 @@ app.post('/api/qa', async (req, res) => {
   res.json(result);
 });
 
-/* ============================ 起動 ============================ */
+/* =============== 起動 =============== */
 const PORT = Number(process.env.PORT || 3000);
 app.listen(PORT, () => {
   console.log(`Sakubun-kun FW running: http://localhost:${PORT}`);
