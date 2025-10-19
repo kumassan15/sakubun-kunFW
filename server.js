@@ -45,6 +45,8 @@ async function callGenerativeLanguageAPI(promptText, modelName) {
       const code = res.status;
       const body = res.data;
 
+      // console.log(`[GenLang] try=${i+1} status=${code} model=${effectiveModel}`);
+
       if (code === 200) {
         const text = body?.candidates?.[0]?.content?.parts?.[0]?.text;
         if (text) return text;
@@ -74,91 +76,7 @@ function createPayload(text) {
   };
 }
 
-/* ========= 構造化（JSONスキーマつき）生成：修正理由を必須にする ========= */
-
-// JSON スキーマ付きで生成を強制
-async function callGenerativeJSON(promptText, modelName, responseSchema) {
-  if (!GEMINI_API_KEY) {
-    throw new Error("APIキー未設定");
-  }
-  const effectiveModel = modelName || 'gemini-2.5-flash';
-  const ENDPOINT =
-    `https://generativelanguage.googleapis.com/v1beta/models/${effectiveModel}:generateContent?key=${GEMINI_API_KEY}`;
-
-  const payload = {
-    contents: [{ parts: [{ text: promptText }] }],
-    generationConfig: {
-      response_mime_type: "application/json",
-      response_schema: responseSchema
-    }
-  };
-
-  const res = await axios.post(ENDPOINT, payload, {
-    headers: { 'Content-Type': 'application/json; charset=utf-8' },
-    validateStatus: () => true
-  });
-
-  if (res.status !== 200) {
-    throw new Error(`structured API error: ${res.status}`);
-  }
-  const text = res?.data?.candidates?.[0]?.content?.parts?.[0]?.text;
-  if (!text) throw new Error("structured API empty");
-  return JSON.parse(text);
-}
-
-// C. 表現（改善項目）スキーマ：reason を必須
-const IMPROVE_SCHEMA_C = {
-  type: "object",
-  additionalProperties: false,
-  required: ["heading", "items"],
-  properties: {
-    heading: { type: "string", const: "C. 表現" },
-    items: {
-      type: "array",
-      minItems: 1,
-      items: {
-        type: "object",
-        additionalProperties: false,
-        required: ["id", "category", "error", "fix", "reason"],
-        properties: {
-          id: { type: "string" },          // "S5" / "S3→S4" など
-          category: { type: "string" },    // "①文法" 等
-          error: { type: "string", minLength: 1 },
-          fix: { type: "string", minLength: 1 },
-          reason: { type: "string", minLength: 8 } // ★必須
-        }
-      }
-    }
-  }
-};
-
-// D. 内容（改善項目）スキーマ：reason を必須
-const IMPROVE_SCHEMA_D = {
-  type: "object",
-  additionalProperties: false,
-  required: ["heading", "items"],
-  properties: {
-    heading: { type: "string", const: "D. 内容" },
-    items: {
-      type: "array",
-      minItems: 1,
-      items: {
-        type: "object",
-        additionalProperties: false,
-        required: ["id", "category", "error", "fix", "reason"],
-        properties: {
-          id: { type: "string" },          // "S3→S4" など
-          category: { type: "string" },    // "2②論理の展開" 等
-          error: { type: "string", minLength: 1 },
-          fix: { type: "string", minLength: 1 },
-          reason: { type: "string", minLength: 8 }
-        }
-      }
-    }
-  }
-};
-
-/* ====== プロンプトビルダ（評価用JSONは従来通り / 詳細はJSON改善配列に変更） ====== */
+/* ====== プロンプトビルダ（GASコードをそのまま移植） ====== */
 
 function buildExpressionPrompt(opts) {
   const question = (opts && opts.question) || "";
@@ -212,24 +130,52 @@ function buildExpressionPrompt(opts) {
   }
 
   if (mode === "detail") {
-    // ★ 改善項目（JSON配列）を作らせる
-    const ctx = [
-      "あなたは日本人高校生向けの英作文指導者です。",
-      "以下の答案に対する『表現面の改善項目』を JSON で返してください。",
-      "必ず items に各項目 { id, category, error, fix, reason } を含めること。",
-      "reason は高校生にも分かる日本語で1行。過剰な意味改変を避け、原文に即した最小修正を提示。"
+    const context = [
+      "【評価結果（機械可読）】",
+      JSON.stringify(expObj)
+    ].join("\n");
+
+    const rules = [
+      "《項目ごとのフィードバック》は①C-1/②C-2を必ず表示。〇△×を明示、根拠はS番号付きで簡潔に。",
+      "《改善ポイント》には△や×と判断した項目に関するものをすべて列挙。",
+      "《改善ポイント》に含む必須情報：文番号→項目番号順、簡潔なエラーメッセージ、改善すべき表現、修正例（過剰な意味改変は避け、実文に即した具体性を重視）、修正理由（添削対象者にとってわかりやすく）。",
+      "《改善ポイント》については、必須情報があれば、その他の出力形式の制約は設けない。箇条書き・段落・例文の提示など、あなたの判断で自由に構成。",
+      "内容面（主題/論旨/飛躍/矛盾/段落/結論）は含めない。"
     ].join("\n");
 
     return [
-      ctx, "",
+      "あなたは大学入試自由英作文を教えている、生徒のやる気を引き出すのが得意な予備校の先生です。",
+      "添削の対象は日本人高校生です。",
+      "添削の目的は、日本の大学受験に合格できるCEFRのB1レベルの文章が書けるようにすることです。",
+      "以下の答案と評価結果を踏まえ、【出力フォーマットC】に従い完成テキストを出力してください。",
+      "出力は「C. 表現」から開始。説明文・コードブロック不要。",
+      "修正例の後に、修正理由も必ず付記。",
+      "",
       "【問題文】",
       (opts.question || "（問題文なし）"),
       "",
       "【あなたの答案（文番号付き）】",
       opts.answerNumbered,
       "",
-      "【評価結果（機械可読）】",
-      JSON.stringify(expObj || {})
+      context,
+      "",
+      "【出力フォーマットCの条件】",
+      rules,
+      "",
+      "＜表示例＞",
+      "C. 表現",
+      "《項目ごとのフィードバック》",
+      "①文法・語法的に正しい表現が使われている → △（不正確2件：S3, S5）",
+      "②多様な語彙・文構造が使われている → 〇",
+      "《改善ポイント》",
+      "S5　①文法（不定詞の省略）",
+      "you don't need carry cash",
+      "→ you don't need to carry cash",
+      "needは一般動詞なので、後ろにto不定詞が必要です。",
+      "S6　②語彙・文構造（B1結束語の追加）",
+      "I was tired. I went home.",
+      "→ Because I was tired, I went home.",
+      "接続詞becauseを使うことで、英文の単調さが解消されます。"
     ].join("\n");
   }
 
@@ -278,24 +224,58 @@ function buildContentPrompt(opts) {
   }
 
   if (mode === "detail") {
-    // ★ 改善項目（JSON配列）を作らせる
-    const ctx = [
-      "あなたは日本人高校生向けの英作文指導者です。",
-      "以下の答案に対する『内容面の改善項目』を JSON で返してください。",
-      "必ず items に各項目 { id, category, error, fix, reason } を含めること。",
-      "reason は高校生にも分かる日本語で1行。Sx→Sy のように文間関係の改善も可。"
+    const context = [
+      "【評価結果（機械可読）】",
+      JSON.stringify(contObj)
+    ].join("\n");
+
+    const fixed = [
+      "【固定評価（再評価禁止）】",
+      "D-1 = " + String(contObj?.items?.["D-1"] ?? "o"),
+      "D-2 = " + String(contObj?.items?.["D-2"] ?? "o"),
+      "D-2_leaps = " + String(contObj?.details?.["D-2_leaps"] ?? 0),
+      "上の固定評価に厳密に一致させる。"
+    ].join("\n");
+
+    const rules = [
+      "《項目ごとのフィードバック》は①②を必ず表示。評価記号は固定値に一致。",
+      "《改善ポイント》には△や×と判断した項目に関するものをすべて列挙。",
+      "《改善ポイント》に含む必須情報：文番号→項目番号順、簡潔なエラーメッセージ、改善すべき表現、修正例（過剰な意味改変は避け、実文に即した具体性を重視）、修正理由（添削対象者にとってわかりやすく）。",
+      "《改善ポイント》については、必須情報があれば、その他の出力形式の制約は設けない。箇条書き・段落・例文の提示など、あなたの判断で自由に構成。",
+      "文法・語法の正確さ・英語母国語話者としての自然な表現や、語彙の多様性・文構造の多様さは含めない。"
     ].join("\n");
 
     return [
-      ctx, "",
+      "あなたは大学入試自由英作文を教えている、生徒のやる気を引き出すのが得意な予備校の先生です。",
+      "添削の対象は日本人高校生です。",
+      "添削の目的は、日本の大学受験に合格できるCEFRのB1レベルの文章が書けるようにすることです。",
+      "以下の答案と評価結果を踏まえ、【出力フォーマットD】で完成テキストを出力。",
+      "出力は「D. 内容」から開始。説明・コードブロック不要。",
+      "修正例の後に、修正理由も必ず付記。",
+      "",
       "【問題文】",
-      (opts.question || "（問題文なし）"),
+      (question || "（問題文なし）"),
       "",
       "【あなたの答案（文番号付き）】",
-      opts.answerNumbered,
+      answerNumbered,
       "",
-      "【評価結果（機械可読）】",
-      JSON.stringify(contObj || {})
+      context,
+      "",
+      fixed,
+      "",
+      "【出力フォーマットDの条件】",
+      rules,
+      "",
+      "＜表示例＞",
+      "D. 内容",
+      "《項目ごとのフィードバック》",
+      "①主題が一貫している → 〇",
+      "②本文が論理的に展開されている → △（飛躍2件：S3→S4、S9→S10）",
+      "",
+      "《改善ポイント》",
+      "S3→S4　2②論理の展開（前後で矛盾している）",
+      "…修正提案…",
+      "S3ではキャッシュレス決済に賛成の立場で書かれているのに、S4では賛成の立場になっています。However,のような逆接の表現が必要です。"
     ].join("\n");
   }
 
@@ -437,50 +417,29 @@ function enforceContentDetailConsistency(contObj, text) {
   return out.join("\n");
 }
 
-/* ================= レンダリング（JSON→人間可読） ================= */
+function buildQAPrompt(ctx) {
+  function clip(s, n){ return (s || "").toString().slice(0, n); }
 
-function renderCOverview(expObj) {
-  const c1 = String(expObj?.items?.["C-1"] ?? "o");
-  const c2 = String(expObj?.items?.["C-2"] ?? "o");
-  const incorrect = Number(expObj?.details?.["C-1_incorrect"] ?? 0);
-  const map = { o: "〇", d: "△", x: "×" };
-  const c1Line = `①文法・語法的に正しい表現が使われている → ${map[c1] || "〇"}${incorrect > 0 ? `（不正確${incorrect}件）` : ""}`;
-  const c2Line = `②多様な語彙・文構造が使われている → ${map[c2] || "〇"}`;
-  return [ "C. 表現", "《項目ごとのフィードバック》", c1Line, c2Line ].join("\n");
-}
+  const q  = clip(ctx.question,          4000);
+  const oq = clip(ctx.originalQuestion,  4000);
+  const ot = clip(ctx.originalText,      12000);
+  const fb = clip(ctx.feedback,          12000);
 
-function renderDOverview(contObj) {
-  const d1 = String(contObj?.items?.["D-1"] ?? "o");
-  const d2 = String(contObj?.items?.["D-2"] ?? "o");
-  const leaps = Number(contObj?.details?.["D-2_leaps"] ?? 0);
-  const map = { o: "〇", d: "△", x: "×" };
-  const d1Line = `①主題が一貫している → ${map[d1] || "〇"}`;
-  const d2Line = `②本文が論理的に展開されている → ${map[d2] || "〇"}${(d2 === 'd' || d2 === 'x') && leaps > 0 ? `（飛躍${leaps}件）` : ""}`;
-  return [ "D. 内容", "《項目ごとのフィードバック》", d1Line, d2Line ].join("\n");
-}
-
-function renderImproveSection(heading, obj) {
-  // obj: { heading, items: [{id, category, error, fix, reason}, ...] }
-  const lines = [];
-  // Overview（①/②）は別で付けるので、ここは《改善ポイント》のみ
-  lines.push("《改善ポイント》");
-  for (const it of (obj.items || [])) {
-    lines.push(`${it.id}　${it.category}`);
-    lines.push(`【エラー】${it.error}`);
-    lines.push(`【修正例】${it.fix}`);
-    lines.push(`【修正理由】${it.reason}`);
-  }
-  return [heading, ...lines].join("\n");
-}
-
-function validateImproveJSON(obj) {
-  if (!obj || obj.heading == null || !Array.isArray(obj.items)) return "malformed";
-  if (obj.items.length === 0) return "no_items";
-  for (const [i, it] of obj.items.entries()) {
-    if (!it.id || !it.error || !it.fix || !it.reason) return `missing_fields_at_${i}`;
-    if (String(it.reason).trim().length < 8) return `short_reason_at_${i}`;
-  }
-  return "ok";
+  return [
+    "あなたは大学入試自由英作文を教えている、生徒のやる気を引き出すのが得意な予備校の先生です。",
+    "質問者は日本人高校生です。",
+    "回答の目的は、日本の大学受験に合格できるCEFRのB1レベルの文章が書けるようにすることです。",
+    "出力形式は自由。通常は日本語、英語指定なら英語で回答。",
+    "",
+    "―― 文脈ここから ――",
+    oq ? `【元の問題文】\n${oq}\n` : "",
+    ot ? `【受験生の解答】\n${ot}\n` : "",
+    fb ? `【フィードバック】\n${fb}\n` : "",
+    "―― 文脈ここまで ――",
+    "",
+    "【質問】",
+    q
+  ].join("\n");
 }
 
 /* ===================== 旧：getFeedback / getQA をAPI化 ===================== */
@@ -537,7 +496,7 @@ async function getFeedback(input) {
 
     const studentTextNumbered = paraChunks.join("\n\n");
 
-    // モデル呼び出し（JSON）評価
+    // モデル呼び出し（JSON）
     const expJsonText = await callGenerativeLanguageAPI(
       buildExpressionPrompt({ question, answerNumbered: studentTextNumbered, mode: 'json' }),
       modelId
@@ -556,47 +515,15 @@ async function getFeedback(input) {
     const contScore   = scores.contScore;
     const totalScore  = scores.totalScore;
 
-    // 《改善ポイント》を JSON（必須キー）で取得
-    let improveC = await callGenerativeJSON(
+    // 詳細（C/D）
+    let formatC = await callGenerativeLanguageAPI(
       buildExpressionPrompt({ question, answerNumbered: studentTextNumbered, mode: 'detail', expObj }),
-      modelId,
-      IMPROVE_SCHEMA_C
-    ).catch(() => null);
-
-    // 失敗時のワンモアトライ
-    if (!improveC || validateImproveJSON(improveC) !== "ok") {
-      improveC = await callGenerativeJSON(
-        buildExpressionPrompt({ question, answerNumbered: studentTextNumbered, mode: 'detail', expObj }),
-        modelId,
-        IMPROVE_SCHEMA_C
-      ).catch(() => null);
-    }
-
-    let improveD = await callGenerativeJSON(
+      modelId
+    );
+    let formatD = await callGenerativeLanguageAPI(
       buildContentPrompt({ question, answerNumbered: studentTextNumbered, mode: 'detail', contObj }),
-      modelId,
-      IMPROVE_SCHEMA_D
-    ).catch(() => null);
-
-    if (!improveD || validateImproveJSON(improveD) !== "ok") {
-      improveD = await callGenerativeJSON(
-        buildContentPrompt({ question, answerNumbered: studentTextNumbered, mode: 'detail', contObj }),
-        modelId,
-        IMPROVE_SCHEMA_D
-      ).catch(() => null);
-    }
-
-    // レンダリング
-    const cOverview = renderCOverview(expObj);
-    const dOverview = renderDOverview(contObj);
-
-    const cImprove = improveC && validateImproveJSON(improveC) === "ok"
-      ? renderImproveSection("C. 表現", improveC)
-      : "C. 表現\n《項目ごとのフィードバック》\n（生成に失敗しました）\n《改善ポイント》\n（生成に失敗しました）";
-
-    const dImprove = improveD && validateImproveJSON(improveD) === "ok"
-      ? renderImproveSection("D. 内容", improveD)
-      : "D. 内容\n《項目ごとのフィードバック》\n（生成に失敗しました）\n《改善ポイント》\n（生成に失敗しました）";
+      modelId
+    );
 
     // 採点要件の1行
     let requirementLine = await callGenerativeLanguageAPI(
@@ -618,11 +545,6 @@ async function getFeedback(input) {
       studentTextNumbered
     ].join("\n");
 
-    // Overviews を《改善ポイント》の前に結合
-    let formatC = [cOverview, "", cImprove.replace(/^C\. 表現\s*/,'C. 表現')].join("\n");
-    let formatD = [dOverview, "", dImprove.replace(/^D\. 内容\s*/,'D. 内容')].join("\n");
-
-    // 仕上げ（既存のクリーンアップロジック）
     let safeC = sanitizeDetail(formatC, "C. 表現");
     safeC = normalizeBlankLines(safeC);
     safeC = enforceExpressionDetailScope(safeC);
@@ -677,31 +599,6 @@ async function getQA(payload) {
   } catch (err) {
     return { status: 'error', message: String(err) };
   }
-}
-
-function buildQAPrompt(ctx) {
-  function clip(s, n){ return (s || "").toString().slice(0, n); }
-
-  const q  = clip(ctx.question,          4000);
-  const oq = clip(ctx.originalQuestion,  4000);
-  const ot = clip(ctx.originalText,      12000);
-  const fb = clip(ctx.feedback,          12000);
-
-  return [
-    "あなたは大学入試自由英作文を教えている、生徒のやる気を引き出すのが得意な予備校の先生です。",
-    "質問者は日本人高校生です。",
-    "回答の目的は、日本の大学受験に合格できるCEFRのB1レベルの文章が書けるようにすることです。",
-    "出力形式は自由。通常は日本語、英語指定なら英語で回答。",
-    "",
-    "―― 文脈ここから ――",
-    oq ? `【元の問題文】\n${oq}\n` : "",
-    ot ? `【受験生の解答】\n${ot}\n` : "",
-    fb ? `【フィードバック】\n${fb}\n` : "",
-    "―― 文脈ここまで ――",
-    "",
-    "【質問】",
-    q
-  ].join("\n");
 }
 
 /* ============================ API ルート ============================ */
