@@ -15,7 +15,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
 
-/* ================= 共通ユーティリティ（GAS→Node移植） ================= */
+/* ================= 共通ユーティリティ ================= */
 
 function normalizeBlankLines(text) {
   if (!text) return text;
@@ -26,7 +26,20 @@ function normalizeBlankLines(text) {
     .replace(/(《改善ポイント》)\n{2,}/g, "$1\n");
 }
 
-async function callGenerativeLanguageAPI(promptText, modelName) {
+function createPayload(text, maxTokens = 512) {
+  return {
+    contents: [{ parts: [{ text }] }],
+    generationConfig: {
+      candidateCount: 1,
+      temperature: 0.2,
+      topK: 40,
+      topP: 0.95,
+      maxOutputTokens: maxTokens
+    }
+  };
+}
+
+async function callGenerativeLanguageAPI(promptText, modelName, maxTokens = 512) {
   if (!GEMINI_API_KEY) {
     return "エラー: APIキーが未設定です。サーバーの .env で GEMINI_API_KEY を設定してください。";
   }
@@ -34,18 +47,17 @@ async function callGenerativeLanguageAPI(promptText, modelName) {
   const ENDPOINT =
     `https://generativelanguage.googleapis.com/v1beta/models/${effectiveModel}:generateContent?key=${GEMINI_API_KEY}`;
 
-  const payload = createPayload(promptText);
+  const payload = createPayload(promptText, maxTokens);
 
   for (let i = 0; i < 3; i++) {
     try {
       const res = await axios.post(ENDPOINT, payload, {
         headers: { 'Content-Type': 'application/json; charset=utf-8' },
-        validateStatus: () => true
+        validateStatus: () => true,
+        timeout: 30000
       });
       const code = res.status;
       const body = res.data;
-
-      // console.log(`[GenLang] try=${i+1} status=${code} model=${effectiveModel}`);
 
       if (code === 200) {
         const text = body?.candidates?.[0]?.content?.parts?.[0]?.text;
@@ -68,15 +80,7 @@ async function callGenerativeLanguageAPI(promptText, modelName) {
   return "エラー: APIが混雑しており応答できません。時間を置いて再試行してください。";
 }
 
-function createPayload(text) {
-  return {
-    contents: [
-      { parts: [ { text } ] }
-    ]
-  };
-}
-
-/* ====== プロンプトビルダ（GASコードをそのまま移植） ====== */
+/* ================= JSONベースの評価プロンプト（元のまま） ================= */
 
 function buildExpressionPrompt(opts) {
   const question = (opts && opts.question) || "";
@@ -130,53 +134,8 @@ function buildExpressionPrompt(opts) {
   }
 
   if (mode === "detail") {
-    const context = [
-      "【評価結果（機械可読）】",
-      JSON.stringify(expObj)
-    ].join("\n");
-
-    const rules = [
-      "《項目ごとのフィードバック》は①C-1/②C-2を必ず表示。〇△×を明示、根拠はS番号付きで簡潔に。",
-      "《改善ポイント》には△や×と判断した項目に関するものをすべて列挙。",
-      "《改善ポイント》に含む必須情報：文番号→項目番号順、簡潔なエラーメッセージ、改善すべき表現、修正例（過剰な意味改変は避け、実文に即した具体性を重視）、修正理由（添削対象者にとってわかりやすく）。",
-      "《改善ポイント》については、必須情報があれば、その他の出力形式の制約は設けない。箇条書き・段落・例文の提示など、あなたの判断で自由に構成。",
-      "内容面（主題/論旨/飛躍/矛盾/段落/結論）は含めない。"
-    ].join("\n");
-
-    return [
-      "あなたは大学入試の厳密な採点官です。",
-      "添削の対象は日本人高校生です。",
-      "添削の目的は、日本の大学受験に合格できるCEFRのB1レベルの文章が書けるようにすることです。",
-      "以下の答案と評価結果を踏まえ、【出力フォーマットC】に従い完成テキストを出力してください。",
-      "出力は「C. 表現」から開始。説明文・コードブロック不要。",
-      "修正例の後に、修正理由も必ず付記。",
-      "",
-      "【問題文】",
-      (opts.question || "（問題文なし）"),
-      "",
-      "【あなたの答案（文番号付き）】",
-      opts.answerNumbered,
-      "",
-      context,
-      "",
-      "【出力フォーマットCの条件】",
-      rules,
-      "",
-      "＜表示例＞",
-      "C. 表現",
-      "《項目ごとのフィードバック》",
-      "①文法・語法的に正しい表現が使われている → △（不正確2件：S3, S5）",
-      "②多様な語彙・文構造が使われている → 〇",
-      "《改善ポイント》",
-      "S5　①文法（不定詞の省略）",
-      "you don't need carry cash",
-      "→ you don't need to carry cash",
-      "needは一般動詞なので、後ろにto不定詞が必要です。",
-      "S6　②語彙・文構造（B1結束語の追加）",
-      "I was tired. I went home.",
-      "→ Because I was tired, I went home.",
-      "接続詞becauseを使うことで、英文の単調さが解消されます。"
-    ].join("\n");
+    // detail モードは使わない（JSON→整形方式へ移行）
+    throw new Error("detail mode is disabled in this build.");
   }
 
   throw new Error("buildExpressionPrompt: invalid mode");
@@ -186,7 +145,6 @@ function buildContentPrompt(opts) {
   const question = (opts && opts.question) || "";
   const answerNumbered = (opts && opts.answerNumbered) || "";
   const mode = (opts && opts.mode) || "json";
-  const contObj = (opts && opts.contObj) || null;
 
   if (mode === "json") {
     const sys = [
@@ -224,74 +182,89 @@ function buildContentPrompt(opts) {
   }
 
   if (mode === "detail") {
-    const context = [
-      "【評価結果（機械可読）】",
-      JSON.stringify(contObj)
-    ].join("\n");
-
-    const fixed = [
-      "【固定評価（再評価禁止）】",
-      "D-1 = " + String(contObj?.items?.["D-1"] ?? "o"),
-      "D-2 = " + String(contObj?.items?.["D-2"] ?? "o"),
-      "D-2_leaps = " + String(contObj?.details?.["D-2_leaps"] ?? 0),
-      "上の固定評価に厳密に一致させる。"
-    ].join("\n");
-
-    const rules = [
-      "《項目ごとのフィードバック》は①②を必ず表示。評価記号は固定値に一致。",
-      "《改善ポイント》には△や×と判断した項目に関するものをすべて列挙。",
-      "《改善ポイント》に含む必須情報：文番号→項目番号順、簡潔なエラーメッセージ、改善すべき表現、修正例（過剰な意味改変は避け、実文に即した具体性を重視）、修正理由（添削対象者にとってわかりやすく）。",
-      "《改善ポイント》については、必須情報があれば、その他の出力形式の制約は設けない。箇条書き・段落・例文の提示など、あなたの判断で自由に構成。",
-      "文法・語法の正確さ・英語母国語話者としての自然な表現や、語彙の多様性・文構造の多様さは含めない。"
-    ].join("\n");
-
-    return [
-      "あなたは大学入試自由英作文を教えている、生徒のやる気を引き出すのが得意な予備校の先生です。",
-      "添削の対象は日本人高校生です。",
-      "添削の目的は、日本の大学受験に合格できるCEFRのB1レベルの文章が書けるようにすることです。",
-      "以下の答案と評価結果を踏まえ、【出力フォーマットD】で完成テキストを出力。",
-      "出力は「D. 内容」から開始。説明・コードブロック不要。",
-      "修正例の後に、修正理由も必ず付記。",
-      "",
-      "【問題文】",
-      (question || "（問題文なし）"),
-      "",
-      "【あなたの答案（文番号付き）】",
-      answerNumbered,
-      "",
-      context,
-      "",
-      fixed,
-      "",
-      "【出力フォーマットDの条件】",
-      rules,
-      "",
-      "＜表示例＞",
-      "D. 内容",
-      "《項目ごとのフィードバック》",
-      "①主題が一貫している → 〇",
-      "②本文が論理的に展開されている → △（飛躍2件：S3→S4、S9→S10）",
-      "",
-      "《改善ポイント》",
-      "S3→S4　2②論理の展開（前後で矛盾している）",
-      "…修正提案…",
-      "S3ではキャッシュレス決済に賛成の立場で書かれているのに、S4では賛成の立場になっています。However,のような逆接の表現が必要です。"
-    ].join("\n");
+    // detail モードは使わない（JSON→整形方式へ移行）
+    throw new Error("detail mode is disabled in this build.");
   }
 
   throw new Error("buildContentPrompt: invalid mode");
 }
 
-function buildRequirementJudgementPrompt(question, wordCount) {
+/* ========== 改善配列JSONプロンプト（新規） ========== */
+
+function buildExpressionImprovementsJSONPrompt({ question, answerNumbered, expObj }) {
   return [
     "あなたは大学入試の厳密な採点官です。",
-    "次の情報を踏まえ、「採点要件：」で始まる1行の日本語だけを出力してください。",
-    "・問題文：" + (question || "（問題文なし）"),
-    "・語数：" + String(wordCount) + "語",
-    "要件：問題文の条件（語数・指定事項）を満たしているかを簡潔に判定（20～40字程度）。",
-    "出力例：採点要件： あなたの答案は58語で問題文に指示された条件をすべて満たしていません。"
+    "対象は日本人高校生。CEFR B1を目標とします。",
+    "以下は表現評価の機械可読結果です。この評価を変更せず、必要な改善点のみを抽出してください。",
+    "",
+    "【問題文】",
+    question || "（問題文なし）",
+    "",
+    "【あなたの答案（文番号付き）】",
+    answerNumbered,
+    "",
+    "【評価結果（固定）】",
+    JSON.stringify(expObj),
+    "",
+    "出力は JSON のみ。次のスキーマに**厳密**に従ってください：",
+    "{",
+    '  "type": "expression_improvements",',
+    '  "items": [',
+    '    {',
+    '      "s": "S番号（例：S3 あるいは S3→S4）",',
+    '      "cat": "①文法・語法 | ②語彙・文構造 のいずれか",',
+    '      "error": "簡潔なエラーメッセージ（日本語）",',
+    '      "before": "原文の該当箇所（必要なら短く）",',
+    '      "after": "修正例（過剰な意味改変を避ける）",',
+    '      "reason": "修正例の後に付記する修正理由（必須・20〜40字、学習者目線）"',
+    '    }',
+    '  ]',
+    "}",
+    "",
+    "制約：",
+    "- itemsは最大6件まで。重要度の高い順に。",
+    "- reasonは**空文字禁止**。具体で簡潔（20〜40字）。",
+    "- 文法・語法/語彙・文構造の範囲外（内容・論理）は含めない。"
   ].join("\n");
 }
+
+function buildContentImprovementsJSONPrompt({ question, answerNumbered, contObj }) {
+  return [
+    "あなたは大学入試自由英作文の指導者です。対象は日本人高校生。CEFR B1を目標とします。",
+    "以下は内容評価（主題/論理）の機械可読結果です。この評価を変更せず、必要な改善点のみを抽出してください。",
+    "",
+    "【問題文】",
+    question || "（問題文なし）",
+    "",
+    "【あなたの答案（文番号付き）】",
+    answerNumbered,
+    "",
+    "【評価結果（固定）】",
+    JSON.stringify(contObj),
+    "",
+    "出力は JSON のみ。次のスキーマに**厳密**に従ってください：",
+    "{",
+    '  "type": "content_improvements",',
+    '  "items": [',
+    '    {',
+    '      "s": "S番号（例：S3→S4 などの飛躍も可）",',
+    '      "cat": "1主題の一貫性 | 2論理展開 のいずれか",',
+    '      "error": "簡潔な問題点（日本語）",',
+    '      "before": "原文の該当箇所（必要なら短く）",',
+    '      "after": "修正例（過剰な意味改変を避ける）",',
+    '      "reason": "修正例の後に付記する修正理由（必須・20〜40字、学習者目線）"',
+    '    }',
+    '  ]',
+    "}",
+    "",
+    "制約：",
+    "- itemsは最大6件まで。重要度の高い順に。",
+    "- reasonは**空文字禁止**。具体で簡潔（20〜40字）。",
+    "- 文法/語法・語彙・文構造は含めない。"
+  ].join("\n");
+}
+
+/* ========== パース/補修/整形 ========== */
 
 function safeParseModelJSON(text) {
   if (!text) throw new Error("モデル応答が空です。");
@@ -304,6 +277,78 @@ function safeParseModelJSON(text) {
   if (!obj || !obj.items) throw new Error("JSON形式が不正です。");
   return obj;
 }
+
+function safeParseImprovementsJSON(text) {
+  if (!text) throw new Error("モデル応答が空です。");
+  const m = text.match(/\{[\s\S]*\}/);
+  const jsonStr = m ? m[0] : text.trim();
+  const obj = JSON.parse(jsonStr);
+  if (!obj || !Array.isArray(obj.items)) throw new Error("改善JSONの形式が不正です。");
+  return obj;
+}
+
+function ensureReasons(items) {
+  return items.map(it => {
+    let reason = String(it.reason || "").trim();
+    if (!reason) {
+      if ((it.cat || "").includes("文法")) reason = "文法規則に合わせて誤用を正し、読み手の誤解を防ぐため。";
+      else if ((it.cat || "").includes("語彙")) reason = "表現をB1相当へ整え、意味の明確さと読みやすさを高めるため。";
+      else if ((it.cat || "").includes("主題")) reason = "主題から逸れないよう内容を焦点化し、一貫性を保つため。";
+      else reason = "論理のつながりを明示し、主張を理解しやすくするため。";
+    }
+    // 20〜40字目安のガード（必要なら短縮）
+    reason = String(reason).slice(0, 50);
+    return { ...it, reason };
+  });
+}
+
+function renderExpressionDetailFromImps({ question, answerNumbered, expObj, imps }) {
+  const items = ensureReasons(imps || []);
+  const lines = [];
+  lines.push("C. 表現");
+  lines.push("《項目ごとのフィードバック》");
+  const c1 = expObj?.items?.["C-1"] || "o";
+  const c2 = expObj?.items?.["C-2"] || "o";
+  const c1mark = c1 === "x" ? "×" : c1 === "d" ? "△" : "〇";
+  const c2mark = c2 === "x" ? "×" : c2 === "d" ? "△" : "〇";
+  lines.push(`①文法・語法 → ${c1mark}`);
+  lines.push(`②語彙・文構造 → ${c2mark}`);
+  lines.push("《改善ポイント》");
+  if (items.length === 0) lines.push("（特になし）");
+  for (const it of items) {
+    lines.push(`${it.s}　${it.cat}`);
+    if (it.before) lines.push(it.before);
+    if (it.after)  lines.push(`→ ${it.after}`);
+    lines.push(`修正理由：${it.reason}`);
+  }
+  return lines.join("\n");
+}
+
+function renderContentDetailFromImps({ contObj, imps }) {
+  const items = ensureReasons(imps || []);
+  const lines = [];
+  lines.push("D. 内容");
+  lines.push("《項目ごとのフィードバック》");
+  const d1 = contObj?.items?.["D-1"] || "o";
+  const d2 = contObj?.items?.["D-2"] || "o";
+  const leaps = Number(contObj?.details?.["D-2_leaps"] ?? 0);
+  const d1mark = d1 === "x" ? "×" : d1 === "d" ? "△" : "〇";
+  const d2mark = d2 === "x" ? "×" : d2 === "d" ? "△" : "〇";
+  const tail = (d2 !== "o" && leaps > 0) ? `（不自然な展開${leaps}カ所）` : "";
+  lines.push(`①主題が一貫している → ${d1mark}`);
+  lines.push(`②本文が論理的に展開されている → ${d2mark}${tail}`);
+  lines.push("《改善ポイント》");
+  if (items.length === 0) lines.push("（特になし）");
+  for (const it of items) {
+    lines.push(`${it.s}　${it.cat}`);
+    if (it.before) lines.push(it.before);
+    if (it.after)  lines.push(`→ ${it.after}`);
+    lines.push(`修正理由：${it.reason}`);
+  }
+  return lines.join("\n");
+}
+
+/* ================= 採点・レンジ調整（元のまま） ================= */
 
 function computeScoresByThresholds(expObj, contObj) {
   // 表現（満点10・最低2）
@@ -417,6 +462,19 @@ function enforceContentDetailConsistency(contObj, text) {
   return out.join("\n");
 }
 
+/* ================= QA用 ================= */
+
+function buildRequirementJudgementPrompt(question, wordCount) {
+  return [
+    "あなたは大学入試の厳密な採点官です。",
+    "次の情報を踏まえ、「採点要件：」で始まる1行の日本語だけを出力してください。",
+    "・問題文：" + (question || "（問題文なし）"),
+    "・語数：" + String(wordCount) + "語",
+    "要件：問題文の条件（語数・指定事項）を満たしているかを簡潔に判定（20～40字程度）。",
+    "出力例：採点要件： あなたの答案は58語で問題文に指示された条件をすべて満たしていません。"
+  ].join("\n");
+}
+
 function buildQAPrompt(ctx) {
   function clip(s, n){ return (s || "").toString().slice(0, n); }
 
@@ -442,7 +500,7 @@ function buildQAPrompt(ctx) {
   ].join("\n");
 }
 
-/* ===================== 旧：getFeedback / getQA をAPI化 ===================== */
+/* ===================== getFeedback / getQA ===================== */
 
 async function getFeedback(input) {
   try {
@@ -496,41 +554,61 @@ async function getFeedback(input) {
 
     const studentTextNumbered = paraChunks.join("\n\n");
 
-    // モデル呼び出し（JSON）
-    const expJsonText = await callGenerativeLanguageAPI(
-      buildExpressionPrompt({ question, answerNumbered: studentTextNumbered, mode: 'json' }),
-      modelId
-    );
-    const contJsonText = await callGenerativeLanguageAPI(
-      buildContentPrompt({ question, answerNumbered: studentTextNumbered, mode: 'json' }),
-      modelId
-    );
+    // JSON評価（短出力）を並列化
+    const [expJsonText, contJsonText] = await Promise.all([
+      callGenerativeLanguageAPI(
+        buildExpressionPrompt({ question, answerNumbered: studentTextNumbered, mode: 'json' }),
+        modelId,
+        600
+      ),
+      callGenerativeLanguageAPI(
+        buildContentPrompt({ question, answerNumbered: studentTextNumbered, mode: 'json' }),
+        modelId,
+        600
+      )
+    ]);
 
     const expObj  = safeParseModelJSON(expJsonText);
     const contObj = safeParseModelJSON(contJsonText);
 
-    // スコア
-    const scores      = computeScoresByThresholds(expObj, contObj);
-    const expScore    = scores.expScore;
-    const contScore   = scores.contScore;
-    const totalScore  = scores.totalScore;
+    // スコア計算
+    const { expScore, contScore, totalScore } = computeScoresByThresholds(expObj, contObj);
 
-    // 詳細（C/D）
-    let formatC = await callGenerativeLanguageAPI(
-      buildExpressionPrompt({ question, answerNumbered: studentTextNumbered, mode: 'detail', expObj }),
-      modelId
-    );
-    let formatD = await callGenerativeLanguageAPI(
-      buildContentPrompt({ question, answerNumbered: studentTextNumbered, mode: 'detail', contObj }),
-      modelId
-    );
+    // 改善配列JSON（理由必須）を並列化
+    const [expImpText, contImpText, requirementLineRaw] = await Promise.all([
+      callGenerativeLanguageAPI(
+        buildExpressionImprovementsJSONPrompt({ question, answerNumbered: studentTextNumbered, expObj }),
+        modelId,
+        700
+      ),
+      callGenerativeLanguageAPI(
+        buildContentImprovementsJSONPrompt({ question, answerNumbered: studentTextNumbered, contObj }),
+        modelId,
+        700
+      ),
+      callGenerativeLanguageAPI(
+        buildRequirementJudgementPrompt(question, wordCount),
+        modelId,
+        80
+      )
+    ]);
+
+    const expImps = safeParseImprovementsJSON(expImpText).items;
+    const contImps = safeParseImprovementsJSON(contImpText).items;
+
+    // 整形（ここで必ず「修正例→修正理由」を出力）
+    let safeC = renderExpressionDetailFromImps({
+      question, answerNumbered: studentTextNumbered, expObj, imps: expImps
+    });
+    safeC = normalizeBlankLines(enforceExpressionDetailScope(safeC));
+
+    let safeD = renderContentDetailFromImps({
+      contObj, imps: contImps
+    });
+    safeD = normalizeBlankLines(enforceContentDetailConsistency(contObj, safeD));
 
     // 採点要件の1行
-    let requirementLine = await callGenerativeLanguageAPI(
-      buildRequirementJudgementPrompt(question, wordCount),
-      modelId
-    );
-    requirementLine = (requirementLine || "").split("\n")[0];
+    let requirementLine = (requirementLineRaw || "").split("\n")[0];
 
     const sectionA = [
       "A. 配点サマリー",
@@ -545,19 +623,11 @@ async function getFeedback(input) {
       studentTextNumbered
     ].join("\n");
 
-    let safeC = sanitizeDetail(formatC, "C. 表現");
-    safeC = normalizeBlankLines(safeC);
-    safeC = enforceExpressionDetailScope(safeC);
-
-    let safeD = sanitizeDetail(formatD, "D. 内容");
-    safeD = normalizeBlankLines(safeD);
-    safeD = enforceContentDetailConsistency(contObj, safeD);
-
     const feedbackAll = [
       sectionA,
       "", sectionB,
-      "", safeC,
-      "", safeD,
+      "", sanitizeDetail(safeC, "C. 表現"),
+      "", sanitizeDetail(safeD, "D. 内容")
     ].join("\n");
 
     return {
@@ -590,7 +660,7 @@ async function getQA(payload) {
       feedback
     });
 
-    const answer = await callGenerativeLanguageAPI(prompt, modelId);
+    const answer = await callGenerativeLanguageAPI(prompt, modelId, 700);
 
     if (!answer || answer.startsWith("エラー") || answer.startsWith("APIからの有効な応答がありませんでした。")) {
       return { status: 'error', message: answer || '応答の解析に失敗しました。' };
