@@ -15,8 +15,12 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
 
-/* ================= 共通ユーティリティ ================= */
+/* ================= ユーティリティ ================= */
 
+// クリップ（長すぎる入力は安全側でカット）
+function clip(s, n){ return (s == null ? "" : String(s)).slice(0, n); }
+
+// 改行・空行の整理（既存）
 function normalizeBlankLines(text) {
   if (!text) return text;
   return String(text)
@@ -26,67 +30,113 @@ function normalizeBlankLines(text) {
     .replace(/(《改善ポイント》)\n{2,}/g, "$1\n");
 }
 
-function createPayload(text, maxTokens = 512) {
-  return {
-    contents: [{ parts: [{ text }] }],
-    generationConfig: {
-      candidateCount: 1,
-      temperature: 0.2,
-      topK: 40,
-      topP: 0.95,
-      maxOutputTokens: maxTokens
-    }
-  };
+/* ================= Gemini呼び出し（堅牢版） ================= */
+
+// レスポンスから文字列を頑健に抽出
+function extractModelText(body){
+  const cand = body?.candidates?.[0];
+  if (!cand) return { text: "", reason: "no_candidates" };
+
+  // parts[].text を全連結
+  let text = "";
+  const parts = cand?.content?.parts;
+  if (Array.isArray(parts)) {
+    text = parts.map(p => p?.text).filter(Boolean).join("");
+  }
+
+  // 一部実装では candidates[0].text に直接入ることも
+  if (!text && typeof cand?.text === "string") {
+    text = cand.text;
+  }
+
+  // コードフェンス（```...```）内に入っている場合を救済
+  if (!text) {
+    const raw = JSON.stringify(body);
+    const m = raw.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+    if (m && m[1]) text = m[1];
+  }
+
+  const block = body?.promptFeedback?.blockReason || cand?.finishReason;
+  if (!text) return { text: "", reason: block || "empty_text" };
+
+  return { text, reason: "ok" };
 }
 
 async function callGenerativeLanguageAPI(promptText, modelName, maxTokens = 512) {
   if (!GEMINI_API_KEY) {
     return "エラー: APIキーが未設定です。サーバーの .env で GEMINI_API_KEY を設定してください。";
   }
-  const effectiveModel = modelName || 'gemini-2.5-flash';
-  const ENDPOINT =
-    `https://generativelanguage.googleapis.com/v1beta/models/${effectiveModel}:generateContent?key=${GEMINI_API_KEY}`;
+  const primary = modelName || 'gemini-2.5-flash';
+  const models = [primary, 'gemini-2.0-flash-lite']; // フォールバック
+  const safetySettings = [
+    { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_ONLY_HIGH" },
+    { category: "HARM_CATEGORY_HARASSMENT",  threshold: "BLOCK_ONLY_HIGH" },
+    { category: "HARM_CATEGORY_SEXUAL",      threshold: "BLOCK_ONLY_HIGH" },
+    { category: "HARM_CATEGORY_DANGEROUS",   threshold: "BLOCK_ONLY_HIGH" }
+  ];
 
-  const payload = createPayload(promptText, maxTokens);
+  for (const effectiveModel of models) {
+    const ENDPOINT =
+      `https://generativelanguage.googleapis.com/v1beta/models/${effectiveModel}:generateContent?key=${GEMINI_API_KEY}`;
 
-  for (let i = 0; i < 3; i++) {
-    try {
-      const res = await axios.post(ENDPOINT, payload, {
-        headers: { 'Content-Type': 'application/json; charset=utf-8' },
-        validateStatus: () => true,
-        timeout: 30000
-      });
-      const code = res.status;
-      const body = res.data;
+    const payload = {
+      contents: [{ parts: [{ text: promptText }]}],
+      generationConfig: {
+        candidateCount: 1, temperature: 0.2, topK: 40, topP: 0.95,
+        maxOutputTokens: maxTokens
+      },
+      safetySettings
+    };
 
-      if (code === 200) {
-        const text = body?.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (text) return text;
-        return "APIからの有効な応答がありませんでした。";
-      } else if (code === 503) {
-        await new Promise(r => setTimeout(r, 2000 * (i + 1)));
-        continue;
-      } else {
+    for (let i = 0; i < 3; i++) {
+      try {
+        const res = await axios.post(ENDPOINT, payload, {
+          headers: { 'Content-Type': 'application/json; charset=utf-8' },
+          validateStatus: () => true,
+          timeout: 30000
+        });
+        const code = res.status;
+        const body = res.data;
+
+        if (code === 200) {
+          const { text, reason } = extractModelText(body);
+          if (text) return text;
+
+          const br = body?.promptFeedback?.blockReason;
+          const sr = body?.candidates?.[0]?.safetyRatings;
+          const meta = `blockReason=${br || reason || "unknown"} safety=${JSON.stringify(sr || [])}`;
+          if (i === 2) return `エラー: モデル応答が安全ポリシーでブロック/空でした（${meta}）。`;
+          await new Promise(r => setTimeout(r, 800 * (i + 1)));
+          continue;
+        }
+
+        if (code === 503) {
+          await new Promise(r => setTimeout(r, 2000 * (i + 1)));
+          continue;
+        }
+
         if (code === 429) return "エラー: リクエスト過多です。しばらくしてから再実行してください。";
         if (code === 401 || code === 403) return "エラー: 認証/権限に問題があります。APIキーや割り当てをご確認ください。";
         if (code === 404) return "エラー: モデルIDが認識されません。指定モデルをご確認ください。";
         if (code >= 500) return "エラー: サーバー側で問題が発生しました。時間を置いて再実行してください。";
-        return "エラー: サービス応答に問題がありました。";
+
+        return `エラー: サービス応答に問題（HTTP ${code}）。${JSON.stringify(body).slice(0,400)}...`;
+      } catch (e) {
+        if (i === 2) return "エラー: 例外が発生しました → " + e;
+        await new Promise(r => setTimeout(r, 800 * (i + 1)));
       }
-    } catch (e) {
-      return "エラー: 例外が発生しました → " + e;
     }
   }
-  return "エラー: APIが混雑しており応答できません。時間を置いて再試行してください。";
+
+  return "エラー: すべてのモデルで応答が得られませんでした。";
 }
 
-/* ================= JSONベースの評価プロンプト（元のまま） ================= */
+/* ================= 評価プロンプト（JSON出力） ================= */
 
 function buildExpressionPrompt(opts) {
-  const question = (opts && opts.question) || "";
-  const answerNumbered = (opts && opts.answerNumbered) || "";
+  const question = clip((opts && opts.question) || "", 2000);
+  const answerNumbered = clip((opts && opts.answerNumbered) || "", 6000);
   const mode = (opts && opts.mode) || "json";
-  const expObj = (opts && opts.expObj) || null;
 
   if (mode === "json") {
     const sys = [
@@ -133,17 +183,12 @@ function buildExpressionPrompt(opts) {
     return sys + "\n" + task;
   }
 
-  if (mode === "detail") {
-    // detail モードは使わない（JSON→整形方式へ移行）
-    throw new Error("detail mode is disabled in this build.");
-  }
-
   throw new Error("buildExpressionPrompt: invalid mode");
 }
 
 function buildContentPrompt(opts) {
-  const question = (opts && opts.question) || "";
-  const answerNumbered = (opts && opts.answerNumbered) || "";
+  const question = clip((opts && opts.question) || "", 2000);
+  const answerNumbered = clip((opts && opts.answerNumbered) || "", 6000);
   const mode = (opts && opts.mode) || "json";
 
   if (mode === "json") {
@@ -181,30 +226,29 @@ function buildContentPrompt(opts) {
     return sys + "\n" + task;
   }
 
-  if (mode === "detail") {
-    // detail モードは使わない（JSON→整形方式へ移行）
-    throw new Error("detail mode is disabled in this build.");
-  }
-
   throw new Error("buildContentPrompt: invalid mode");
 }
 
-/* ========== 改善配列JSONプロンプト（新規） ========== */
+/* ================= 改善配列JSONプロンプト ================= */
 
 function buildExpressionImprovementsJSONPrompt({ question, answerNumbered, expObj }) {
+  const q  = clip(question, 2000);
+  const an = clip(answerNumbered, 6000);
+  const ej = clip(JSON.stringify(expObj || {}), 2500);
+
   return [
     "あなたは大学入試の厳密な採点官です。",
     "対象は日本人高校生。CEFR B1を目標とします。",
     "以下は表現評価の機械可読結果です。この評価を変更せず、必要な改善点のみを抽出してください。",
     "",
     "【問題文】",
-    question || "（問題文なし）",
+    q || "（問題文なし）",
     "",
     "【あなたの答案（文番号付き）】",
-    answerNumbered,
+    an,
     "",
     "【評価結果（固定）】",
-    JSON.stringify(expObj),
+    ej,
     "",
     "出力は JSON のみ。次のスキーマに**厳密**に従ってください：",
     "{",
@@ -229,18 +273,22 @@ function buildExpressionImprovementsJSONPrompt({ question, answerNumbered, expOb
 }
 
 function buildContentImprovementsJSONPrompt({ question, answerNumbered, contObj }) {
+  const q  = clip(question, 2000);
+  const an = clip(answerNumbered, 6000);
+  const cj = clip(JSON.stringify(contObj || {}), 2500);
+
   return [
     "あなたは大学入試自由英作文の指導者です。対象は日本人高校生。CEFR B1を目標とします。",
     "以下は内容評価（主題/論理）の機械可読結果です。この評価を変更せず、必要な改善点のみを抽出してください。",
     "",
     "【問題文】",
-    question || "（問題文なし）",
+    q || "（問題文なし）",
     "",
     "【あなたの答案（文番号付き）】",
-    answerNumbered,
+    an,
     "",
     "【評価結果（固定）】",
-    JSON.stringify(contObj),
+    cj,
     "",
     "出力は JSON のみ。次のスキーマに**厳密**に従ってください：",
     "{",
@@ -264,26 +312,26 @@ function buildContentImprovementsJSONPrompt({ question, answerNumbered, contObj 
   ].join("\n");
 }
 
-/* ========== パース/補修/整形 ========== */
+/* ================= JSONパース/補修/整形 ================= */
 
-function safeParseModelJSON(text) {
-  if (!text) throw new Error("モデル応答が空です。");
+function safeParseModelJSON(text, label="") {
+  if (!text) throw new Error(`モデル応答が空です（${label}）。`);
   if (/^エラー|^APIからの有効な応答がありませんでした。/.test(text)) {
-    throw new Error("モデル応答がエラーです: " + text);
+    throw new Error(`モデル応答がエラーです（${label}）: ` + text);
   }
   const m = text.match(/\{[\s\S]*\}/);
   const jsonStr = m ? m[0] : text.trim();
   const obj = JSON.parse(jsonStr);
-  if (!obj || !obj.items) throw new Error("JSON形式が不正です。");
+  if (!obj || !obj.items) throw new Error(`JSON形式が不正です（${label}）。`);
   return obj;
 }
 
-function safeParseImprovementsJSON(text) {
-  if (!text) throw new Error("モデル応答が空です。");
+function safeParseImprovementsJSON(text, label="") {
+  if (!text) throw new Error(`モデル応答が空です（${label}）。`);
   const m = text.match(/\{[\s\S]*\}/);
   const jsonStr = m ? m[0] : text.trim();
   const obj = JSON.parse(jsonStr);
-  if (!obj || !Array.isArray(obj.items)) throw new Error("改善JSONの形式が不正です。");
+  if (!obj || !Array.isArray(obj.items)) throw new Error(`改善JSONの形式が不正です（${label}）。`);
   return obj;
 }
 
@@ -296,13 +344,11 @@ function ensureReasons(items) {
       else if ((it.cat || "").includes("主題")) reason = "主題から逸れないよう内容を焦点化し、一貫性を保つため。";
       else reason = "論理のつながりを明示し、主張を理解しやすくするため。";
     }
-    // 20〜40字目安のガード（必要なら短縮）
-    reason = String(reason).slice(0, 50);
-    return { ...it, reason };
+    return { ...it, reason: clip(reason, 50) }; // 20〜40字目安、上限50
   });
 }
 
-function renderExpressionDetailFromImps({ question, answerNumbered, expObj, imps }) {
+function renderExpressionDetailFromImps({ expObj, imps }) {
   const items = ensureReasons(imps || []);
   const lines = [];
   lines.push("C. 表現");
@@ -334,7 +380,7 @@ function renderContentDetailFromImps({ contObj, imps }) {
   const leaps = Number(contObj?.details?.["D-2_leaps"] ?? 0);
   const d1mark = d1 === "x" ? "×" : d1 === "d" ? "△" : "〇";
   const d2mark = d2 === "x" ? "×" : d2 === "d" ? "△" : "〇";
-  const tail = (d2 !== "o" && leaps > 0) ? `（不自然な展開${leaps}カ所）` : "";
+  const tail = (d2 !== "o" && leaps > 0) ? `（飛躍${leaps}件）` : "";
   lines.push(`①主題が一貫している → ${d1mark}`);
   lines.push(`②本文が論理的に展開されている → ${d2mark}${tail}`);
   lines.push("《改善ポイント》");
@@ -348,7 +394,7 @@ function renderContentDetailFromImps({ contObj, imps }) {
   return lines.join("\n");
 }
 
-/* ================= 採点・レンジ調整（元のまま） ================= */
+/* ================= スコア/整形ガード（既存ロジック） ================= */
 
 function computeScoresByThresholds(expObj, contObj) {
   // 表現（満点10・最低2）
@@ -462,13 +508,14 @@ function enforceContentDetailConsistency(contObj, text) {
   return out.join("\n");
 }
 
-/* ================= QA用 ================= */
+/* ================= 採点要件・QA ================= */
 
 function buildRequirementJudgementPrompt(question, wordCount) {
+  const q = clip(question || "（問題文なし）", 2000);
   return [
     "あなたは大学入試の厳密な採点官です。",
     "次の情報を踏まえ、「採点要件：」で始まる1行の日本語だけを出力してください。",
-    "・問題文：" + (question || "（問題文なし）"),
+    "・問題文：" + q,
     "・語数：" + String(wordCount) + "語",
     "要件：問題文の条件（語数・指定事項）を満たしているかを簡潔に判定（20～40字程度）。",
     "出力例：採点要件： あなたの答案は58語で問題文に指示された条件をすべて満たしていません。"
@@ -476,12 +523,10 @@ function buildRequirementJudgementPrompt(question, wordCount) {
 }
 
 function buildQAPrompt(ctx) {
-  function clip(s, n){ return (s || "").toString().slice(0, n); }
-
   const q  = clip(ctx.question,          4000);
   const oq = clip(ctx.originalQuestion,  4000);
-  const ot = clip(ctx.originalText,      12000);
-  const fb = clip(ctx.feedback,          12000);
+  const ot = clip(ctx.originalText,     12000);
+  const fb = clip(ctx.feedback,         12000);
 
   return [
     "あなたは大学入試自由英作文を教えている、生徒のやる気を引き出すのが得意な予備校の先生です。",
@@ -500,7 +545,7 @@ function buildQAPrompt(ctx) {
   ].join("\n");
 }
 
-/* ===================== getFeedback / getQA ===================== */
+/* ================= フィードバックAPI本体 ================= */
 
 async function getFeedback(input) {
   try {
@@ -568,8 +613,8 @@ async function getFeedback(input) {
       )
     ]);
 
-    const expObj  = safeParseModelJSON(expJsonText);
-    const contObj = safeParseModelJSON(contJsonText);
+    const expObj  = safeParseModelJSON(expJsonText, "表現JSON");
+    const contObj = safeParseModelJSON(contJsonText, "内容JSON");
 
     // スコア計算
     const { expScore, contScore, totalScore } = computeScoresByThresholds(expObj, contObj);
@@ -593,18 +638,14 @@ async function getFeedback(input) {
       )
     ]);
 
-    const expImps = safeParseImprovementsJSON(expImpText).items;
-    const contImps = safeParseImprovementsJSON(contImpText).items;
+    const expImps = safeParseImprovementsJSON(expImpText, "表現改善JSON").items;
+    const contImps = safeParseImprovementsJSON(contImpText, "内容改善JSON").items;
 
     // 整形（ここで必ず「修正例→修正理由」を出力）
-    let safeC = renderExpressionDetailFromImps({
-      question, answerNumbered: studentTextNumbered, expObj, imps: expImps
-    });
+    let safeC = renderExpressionDetailFromImps({ expObj, imps: expImps });
     safeC = normalizeBlankLines(enforceExpressionDetailScope(safeC));
 
-    let safeD = renderContentDetailFromImps({
-      contObj, imps: contImps
-    });
+    let safeD = renderContentDetailFromImps({ contObj, imps: contImps });
     safeD = normalizeBlankLines(enforceContentDetailConsistency(contObj, safeD));
 
     // 採点要件の1行
